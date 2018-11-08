@@ -101,7 +101,7 @@ class _UserDeviceSpec(object):
       self.function = pydev.merge_device(self._device_name_or_function)
 
 
-class _NullContextmanager(object):
+class NullContextmanager(object):
 
   def __enter__(self):
     pass
@@ -318,6 +318,9 @@ class Tensor(_TensorLike):
     self._op = op
     self._value_index = value_index
     self._dtype = dtypes.as_dtype(dtype)
+
+    # This will be set by self._as_tf_output().
+    self._tf_output = None
 
     # This will be set by self.shape().
     self._shape_val = None
@@ -601,7 +604,13 @@ class Tensor(_TensorLike):
 
   def _as_tf_output(self):
     # pylint: disable=protected-access
-    return c_api_util.tf_output(self.op._c_op, self.value_index)
+    # NOTE: Beyond preventing unnecessary (re-)allocation, the cached object
+    # also guarantees that a dictionary of tf_output objects will retain a
+    # deterministic (yet unsorted) order which prevents memory blowup in the
+    # cache of executor(s) stored for every session.
+    if self._tf_output is None:
+      self._tf_output = c_api_util.tf_output(self.op._c_op, self.value_index)
+    return self._tf_output
     # pylint: enable=protected-access
 
   def __str__(self):
@@ -1059,7 +1068,8 @@ def internal_convert_to_tensor(value,
                                name=None,
                                as_ref=False,
                                preferred_dtype=None,
-                               ctx=None):
+                               ctx=None,
+                               accept_symbolic_tensors=True):
   """Converts the given `value` to an `Tensor`.
 
   This function converts Python objects of various types to `Tensor`
@@ -1083,6 +1093,10 @@ def internal_convert_to_tensor(value,
       can be used as a soft preference.  If the conversion to
       `preferred_dtype` is not possible, this argument has no effect.
     ctx: Optional: The value of context.context().
+    accept_symbolic_tensors: Whether Keras graph tensors should be accepted as
+      a valid tensor type during eager execution.
+      If False, this function will raise an exception if it is passed such
+      a tensor during eager eager execution.
 
   Returns:
     A `Tensor` based on `value`.
@@ -1106,6 +1120,19 @@ def internal_convert_to_tensor(value,
         raise RuntimeError("Attempting to capture an EagerTensor without "
                            "building a function.")
       return graph.capture(value, name=name)
+  elif ((not accept_symbolic_tensors) and
+        isinstance(value, Tensor) and
+        ctx.executing_eagerly()):
+    # Found a symbolic tensor in an eager context.
+    # This happens when we use the Keras functional API (i.e. calling layers
+    # on the output of `keras.Input()`, which is symbolic) while eager
+    # execution is enabled.
+    if _is_keras_symbolic_tensor(value):
+      # If the graph of the tensor isn't the Keras graph, we should still
+      # fail, for the time being. TODO(fchollet): consider allowing
+      # all symbolic tensors to raise this exception in this case.
+      raise core._SymbolicException(  # pylint: disable=protected-access
+          "Using the symbolic output of a Keras layer during eager execution.")
 
   if dtype is not None:
     dtype = dtypes.as_dtype(dtype)
@@ -1605,6 +1632,8 @@ def _create_c_op(graph, node_def, inputs, control_inputs):
   op_desc = c_api.TF_NewOperation(graph._c_graph,
                                   compat.as_str(node_def.op),
                                   compat.as_str(node_def.name))
+  if node_def.device:
+    c_api.TF_SetDevice(op_desc, compat.as_str(node_def.device))
   # Add inputs
   for op_input in inputs:
     if isinstance(op_input, (list, tuple)):
@@ -4140,10 +4169,7 @@ class Graph(object):
     if op is None and not ignore_existing:
       raise ValueError("Trying to reset colocation (op is None) but "
                        "ignore_existing is not True")
-
-    if op is not None and not isinstance(op, Operation):
-      # We always want to colocate with the reference op.
-      op = internal_convert_to_tensor_or_indexed_slices(op, as_ref=True).op
+    op = _op_to_colocate_with(op)
 
     # By default, colocate_with resets the device function stack,
     # since colocate_with is typically used in specific internal
@@ -4952,9 +4978,11 @@ def container(container_name):
 def _colocate_with_for_gradient(op, gradient_uid, ignore_existing=False):
   if context.executing_eagerly():
     if op is not None:
+      if not hasattr(op, "device"):
+        op = internal_convert_to_tensor_or_indexed_slices(op)
       return device(op.device)
     else:
-      return _NullContextmanager()
+      return NullContextmanager()
   else:
     default_graph = get_default_graph()
     if isinstance(op, EagerTensor):
@@ -4967,7 +4995,10 @@ def _colocate_with_for_gradient(op, gradient_uid, ignore_existing=False):
         op, gradient_uid=gradient_uid, ignore_existing=ignore_existing)
 
 
-@tf_export("colocate_with")
+@deprecation.deprecated(
+    date=None,
+    instructions="Colocations handled automatically by placer.")
+@tf_export(v1=["colocate_with"])
 def colocate_with(op, ignore_existing=False):
   return _colocate_with_for_gradient(op, None, ignore_existing=ignore_existing)
 
@@ -4999,7 +5030,7 @@ def control_dependencies(control_inputs):
       for control in control_inputs:
         if callable(control):
           control()
-    return _NullContextmanager()
+    return NullContextmanager()
   else:
     return get_default_graph().control_dependencies(control_inputs)
 
@@ -5099,7 +5130,7 @@ def default_session(session):
   return _default_session_stack.get_controller(session)
 
 
-@tf_export("get_default_session")
+@tf_export(v1=["get_default_session"])
 def get_default_session():
   """Returns the default session for the current thread.
 
@@ -5352,6 +5383,16 @@ def init_scope():
         outer_graph._device_function_stack = outer_device_stack  # pylint: disable=protected-access
 
 
+def executing_eagerly_outside_functions():
+  """Returns True if executing eagerly, even if inside a graph function."""
+  with init_scope():
+    return context.executing_eagerly()
+
+
+def inside_function():
+  return get_default_graph().building_function
+
+
 @tf_export("enable_eager_execution")
 def enable_eager_execution(config=None,
                            device_policy=None,
@@ -5460,8 +5501,7 @@ def enable_eager_execution_internal(config=None,
         "tf.contrib.eager.ASYNC")
   if context.default_execution_mode == context.GRAPH_MODE:
     graph_mode_has_been_used = (
-        _default_session_stack.stack
-        or len(get_default_graph().get_operations()) > 0)  # pylint: disable=g-explicit-length-test
+        _default_graph_stack._global_default_graph is not None) # pylint: disable=protected-access
     if graph_mode_has_been_used:
       raise ValueError(
           "tf.enable_eager_execution must be called at program startup.")
@@ -5978,6 +6018,13 @@ class name_scope(object):  # pylint: disable=invalid-name
     self._values = values
     self._ctx = context.context()
     self._in_eager_mode = self._ctx.executing_eagerly()
+    self._has_symbolic_input_in_eager = False
+    if self._values and self._in_eager_mode:
+      # The presence of a graph tensor in `self._values` overrides the context.
+      for value in self._values:
+        if hasattr(value, "graph"):
+          self._has_symbolic_input_in_eager = True
+          self._name_scope = value.graph.name_scope(self._name)
 
   def __enter__(self):
     """Start the scope block.
@@ -5989,6 +6036,9 @@ class name_scope(object):  # pylint: disable=invalid-name
       ValueError: if neither `name` nor `default_name` is provided
         but `values` are.
     """
+    if self._has_symbolic_input_in_eager:
+      return self._name_scope.__enter__()
+
     if self._in_eager_mode:
       self._old_name = self._ctx.scope_name
       if not self._name:
@@ -6031,7 +6081,9 @@ class name_scope(object):  # pylint: disable=invalid-name
         raise
 
   def __exit__(self, type_arg, value_arg, traceback_arg):
-    if self._in_eager_mode:
+    if self._has_symbolic_input_in_eager:
+      self._name_scope.__exit__(type_arg, value_arg, traceback_arg)
+    elif self._in_eager_mode:
       self._ctx.scope_name = self._old_name
     else:
       self._name_scope.__exit__(type_arg, value_arg, traceback_arg)
@@ -6166,6 +6218,33 @@ def _operation_conversion_error(op, dtype=None, name=None, as_ref=False):
   raise TypeError(("Can't convert Operation '%s' to Tensor "
                    "(target dtype=%r, name=%r, as_ref=%r)") % (op.name, dtype,
                                                                name, as_ref))
+
+
+def _op_to_colocate_with(v):
+  """Operation object corresponding to v to use for colocation constraints."""
+  if v is None:
+    return None
+  if isinstance(v, Operation):
+    return v
+  # We always want to colocate with the reference op.
+  # When 'v' is a ResourceVariable, the reference op is the handle creating op.
+  #
+  # What this should be is:
+  # if isinstance(v, ResourceVariable):
+  #   return v.handle.op
+  # However, that would require a circular import dependency.
+  # As of October 2018, there were attempts underway to remove
+  # colocation constraints altogether. Assuming that will
+  # happen soon, perhaps this hack to work around the circular
+  # import dependency is acceptable.
+  if hasattr(v, "handle") and hasattr(v.handle, "op") and isinstance(
+      v.handle.op, Operation):
+    return v.handle.op
+  return internal_convert_to_tensor_or_indexed_slices(v, as_ref=True).op
+
+
+def _is_keras_symbolic_tensor(x):
+  return hasattr(x, "graph") and getattr(x.graph, "name", None) == "keras_graph"
 
 
 register_tensor_conversion_function(Operation, _operation_conversion_error)

@@ -253,6 +253,7 @@ cc_library(
         "//tensorflow/compiler/xla:xla_data_proto",
         "//tensorflow/core:lib",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/base",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/memory",
@@ -294,6 +295,7 @@ cc_library(
     srcs = [
         "dfs_hlo_visitor.cc",
         "hlo_computation.cc",
+        "hlo_input_output_alias_config.cc",
         "hlo_instruction.cc",
         "hlo_instructions.cc",
         "hlo_module.cc",
@@ -308,6 +310,7 @@ cc_library(
         "hlo_clone_context.h",
         "hlo_computation.h",
         "hlo_domain_metadata.h",
+        "hlo_input_output_alias_config.h",
         "hlo_instruction.h",
         "hlo_instructions.h",
         "hlo_module.h",
@@ -320,7 +323,6 @@ cc_library(
         ":hlo_casting_utils",
         ":hlo_module_config",
         ":hlo_proto",
-        ":hlo_reachability",
         ":name_uniquer",
         "//tensorflow/compiler/xla:array",
         "//tensorflow/compiler/xla:literal",
@@ -399,6 +401,7 @@ cc_library(
     srcs = ["hlo_reachability.cc"],
     hdrs = ["hlo_reachability.h"],
     deps = [
+        ":hlo",
         "//tensorflow/compiler/xla:types",
         "//tensorflow/compiler/xla:util",
         "//tensorflow/core:lib",
@@ -644,6 +647,7 @@ cc_library(
         ":allocation_tracker",
         ":backend",
         ":channel_tracker",
+        ":compilation_cache",
         ":compiler",
         ":computation_layout",
         ":device_memory_allocator",
@@ -808,6 +812,7 @@ tf_cc_test(
         "//tensorflow/compiler/xla:test_helpers",
         "//tensorflow/compiler/xla/tests:xla_internal_test_main",
         "//tensorflow/core:ptr_util",
+        "//tensorflow/core:stream_executor_no_cuda",
         "//tensorflow/core:test",
         "@com_google_absl//absl/memory",
     ],
@@ -858,6 +863,7 @@ cc_library(
         ":executable",
         ":hlo",
         ":hlo_module_config",
+        ":hlo_module_group",
         ":logical_buffer",
         "//tensorflow/compiler/xla:statusor",
         "//tensorflow/compiler/xla:types",
@@ -1099,6 +1105,7 @@ cc_library(
         ":hlo",
         ":hlo_dataflow_analysis",
         ":hlo_proto",
+        ":hlo_reachability",
         ":hlo_value",
         "//tensorflow/compiler/xla:shape_util",
         "//tensorflow/compiler/xla:status_macros",
@@ -1268,6 +1275,25 @@ tf_cc_test(
     ],
 )
 
+tf_cc_test(
+    name = "hlo_input_output_alias_config_test",
+    srcs = ["hlo_input_output_alias_config_test.cc"],
+    deps = [
+        ":hlo",
+        ":hlo_dce",
+        ":hlo_memory_scheduler",
+        ":hlo_ordering",
+        ":hlo_parser",
+        "//tensorflow/compiler/xla:shape_util",
+        "//tensorflow/compiler/xla:types",
+        "//tensorflow/compiler/xla:xla_data_proto",
+        "//tensorflow/compiler/xla/tests:hlo_test_base",
+        "//tensorflow/compiler/xla/tests:xla_internal_test_main",
+        "//tensorflow/core:test",
+        "@com_google_absl//absl/algorithm:container",
+    ],
+)
+
 cc_library(
     name = "hlo_memory_scheduler",
     srcs = ["hlo_memory_scheduler.cc"],
@@ -1339,6 +1365,7 @@ cc_library(
         ":fusion_queue",
         ":hlo",
         ":hlo_pass",
+        ":hlo_reachability",
         "//tensorflow/compiler/xla:util",
         "//tensorflow/core:lib",
         "@com_google_absl//absl/algorithm:container",
@@ -1364,6 +1391,7 @@ cc_library(
     srcs = ["multi_output_fusion.cc"],
     hdrs = ["multi_output_fusion.h"],
     deps = [
+        ":hlo_reachability",
         "//tensorflow/compiler/xla:shape_util",
         "//tensorflow/compiler/xla:statusor",
         "//tensorflow/compiler/xla/service:hlo",
@@ -2311,6 +2339,20 @@ tf_cc_test(
 )
 
 cc_library(
+    name = "compilation_cache",
+    srcs = ["compilation_cache.cc"],
+    hdrs = ["compilation_cache.h"],
+    deps = [
+        ":executable",
+        ":hlo_module_config",
+        "//tensorflow/compiler/xla:types",
+        "//tensorflow/compiler/xla:util",
+        "//tensorflow/compiler/xla:xla_data_proto",
+        "//tensorflow/core:lib",
+    ],
+)
+
+cc_library(
     name = "layout_assignment",
     srcs = [
         "layout_assignment.cc",
@@ -2450,6 +2492,7 @@ tf_cc_test(
         ":hlo",
         ":hlo_parser",
         ":hlo_verifier",
+        ":layout_assignment",
         "//tensorflow/compiler/xla:shape_util",
         "//tensorflow/compiler/xla:test",
         "//tensorflow/compiler/xla:types",
@@ -3126,6 +3169,7 @@ cc_library(
         ":buffer_assignment",
         ":hlo",
         ":hlo_proto",
+        ":hlo_verifier",
         "//tensorflow/compiler/xla:status",
         "//tensorflow/compiler/xla:util",
     ],
@@ -3188,6 +3232,7 @@ cc_library(
         ":computation_placer",
         ":executable",
         ":hlo",
+        ":hlo_module_group",
         ":transfer_manager",
         "//tensorflow/compiler/xla:shape_util",
         "//tensorflow/compiler/xla:status_macros",
@@ -3215,6 +3260,7 @@ cc_library(
         ":hlo_profile_printer_data",
         ":human_readable_profile_builder",
         "//tensorflow/compiler/xla:types",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -3251,6 +3297,8 @@ cc_library(
         ":tuple_util",
         "//tensorflow/compiler/xla:literal_util",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -3339,6 +3387,7 @@ cc_library(
         ":bfloat16_normalization",
         ":defuser",
         ":hlo",
+        ":hlo_memory_scheduler",
         ":hlo_pass",
         ":hlo_pass_pipeline",
         ":implicit_broadcast_remover",
@@ -3422,6 +3471,7 @@ tf_cc_test(
         ":hlo_casting_utils",
         ":hlo_matchers",
         ":hlo_parser",
+        "//tensorflow/compiler/xla:test_helpers",
         "//tensorflow/compiler/xla:window_util",
         "//tensorflow/core:lib",
         "//tensorflow/core:test",

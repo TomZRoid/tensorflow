@@ -365,7 +365,7 @@ def sqrt(x, name=None):
       return gen_math_ops.sqrt(x, name=name)
 
 
-@tf_export("math.erf", "erf")
+@tf_export("math.erf", v1=["math.erf", "erf"])
 @deprecation.deprecated_endpoints("erf")
 def erf(x, name=None):
   """Computes the Gauss error function of `x` element-wise.
@@ -487,7 +487,7 @@ def complex(real, imag, name=None):
     return gen_math_ops._complex(real, imag, Tout=Tout, name=name)
 
 
-@tf_export("math.real", "real")
+@tf_export("math.real", v1=["math.real", "real"])
 @deprecation.deprecated_endpoints("real")
 def real(input, name=None):
   r"""Returns the real part of a complex (or real) tensor.
@@ -519,7 +519,7 @@ def real(input, name=None):
       return input
 
 
-@tf_export("math.imag", "imag")
+@tf_export("math.imag", v1=["math.imag", "imag"])
 @deprecation.deprecated_endpoints("imag")
 def imag(input, name=None):
   r"""Returns the imaginary part of a complex (or real) tensor.
@@ -550,7 +550,7 @@ def imag(input, name=None):
       return array_ops.zeros_like(input)
 
 
-@tf_export("math.angle", "angle")
+@tf_export("math.angle", v1=["math.angle", "angle"])
 @deprecation.deprecated_endpoints("angle")
 def angle(input, name=None):
   r"""Returns the element-wise argument of a complex (or real) tensor.
@@ -1082,7 +1082,7 @@ mod = gen_math_ops.floor_mod
 
 # TODO(aselle): Deprecate this once all internal functionality uses
 # tf.truncatediv
-@tf_export("math.floordiv", "floordiv")
+@tf_export("math.floordiv", v1=["math.floordiv", "floordiv"])
 @deprecation.deprecated_endpoints("floordiv")
 def floordiv(x, y, name=None):
   """Divides `x / y` elementwise, rounding toward the most negative integer.
@@ -1156,7 +1156,7 @@ _OverrideBinaryOperatorHelper(gen_math_ops.floor_mod, "mod")
 _OverrideBinaryOperatorHelper(pow, "pow")
 
 
-@tf_export("math.logical_xor", "logical_xor")
+@tf_export("math.logical_xor", v1=["math.logical_xor", "logical_xor"])
 @deprecation.deprecated_endpoints("logical_xor")
 def logical_xor(x, y, name="LogicalXor"):
   """x ^ y = (x | y) & ~(x & y)."""
@@ -1267,8 +1267,8 @@ def _ReductionDims(x, axis, reduction_indices):
     if rank is not None:
       return constant_op.constant(np.arange(rank), dtype=dtypes.int32)
     if (isinstance(x, sparse_tensor.SparseTensor) and
-        x.dense_shape.get_shape().is_fully_defined()):
-      rank = x.dense_shape.get_shape()[0].value  # sparse.dense_shape is 1-D.
+        x.dense_shape.shape.is_fully_defined()):
+      rank = x.dense_shape.shape.dims[0].value  # sparse.dense_shape is 1-D.
       return constant_op.constant(np.arange(rank), dtype=dtypes.int32)
 
     # Otherwise, we rely on Range and Rank to do the right thing at run-time.
@@ -1833,7 +1833,7 @@ def reduce_logsumexp(input_tensor,
     return _may_reduce_to_scalar(keepdims, axis, reduction_indices, result)
 
 
-@tf_export("linalg.trace", "trace")
+@tf_export("linalg.trace", v1=["linalg.trace", "trace"])
 @deprecation.deprecated_endpoints("trace")
 def trace(x, name=None):
   """Compute the trace of a tensor `x`.
@@ -2057,6 +2057,104 @@ def matmul(a,
           a, b, transpose_a=transpose_a, transpose_b=transpose_b, name=name)
 
 
+@tf_export("linalg.matvec")
+def matvec(a,
+           b,
+           transpose_a=False,
+           adjoint_a=False,
+           a_is_sparse=False,
+           b_is_sparse=False,
+           name=None):
+  """Multiplies matrix `a` by vector `b`, producing `a` * `b`.
+
+  The matrix `a` must, following any transpositions, be a tensor of rank >= 2,
+  and we must have `shape(b) = shape(a)[:-2] + [shape(a)[-1]]`.
+
+  Both `a` and `b` must be of the same type. The supported types are:
+  `float16`, `float32`, `float64`, `int32`, `complex64`, `complex128`.
+
+  Matrix `a` can be transposed or adjointed (conjugated and transposed) on
+  the fly by setting one of the corresponding flag to `True`. These are `False`
+  by default.
+
+  If one or both of the inputs contain a lot of zeros, a more efficient
+  multiplication algorithm can be used by setting the corresponding
+  `a_is_sparse` or `b_is_sparse` flag to `True`. These are `False` by default.
+  This optimization is only available for plain matrices/vectors (rank-2/1
+  tensors) with datatypes `bfloat16` or `float32`.
+
+  For example:
+
+  ```python
+  # 2-D tensor `a`
+  # [[1, 2, 3],
+  #  [4, 5, 6]]
+  a = tf.constant([1, 2, 3, 4, 5, 6], shape=[2, 3])
+
+  # 1-D tensor `b`
+  # [7, 9, 11]
+  b = tf.constant([7, 9, 11], shape=[3])
+
+  # `a` * `b`
+  # [ 58,  64]
+  c = tf.matvec(a, b)
+
+
+  # 3-D tensor `a`
+  # [[[ 1,  2,  3],
+  #   [ 4,  5,  6]],
+  #  [[ 7,  8,  9],
+  #   [10, 11, 12]]]
+  a = tf.constant(np.arange(1, 13, dtype=np.int32),
+                  shape=[2, 2, 3])
+
+  # 2-D tensor `b`
+  # [[13, 14, 15],
+  #  [16, 17, 18]]
+  b = tf.constant(np.arange(13, 19, dtype=np.int32),
+                  shape=[2, 3])
+
+  # `a` * `b`
+  # [[ 86, 212],
+  #  [410, 563]]
+  c = tf.matvec(a, b)
+  ```
+
+  Args:
+    a: `Tensor` of type `float16`, `float32`, `float64`, `int32`, `complex64`,
+      `complex128` and rank > 1.
+    b: `Tensor` with same type and rank = `rank(a) - 1`.
+    transpose_a: If `True`, `a` is transposed before multiplication.
+    adjoint_a: If `True`, `a` is conjugated and transposed before
+      multiplication.
+    a_is_sparse: If `True`, `a` is treated as a sparse matrix.
+    b_is_sparse: If `True`, `b` is treated as a sparse matrix.
+    name: Name for the operation (optional).
+
+  Returns:
+    A `Tensor` of the same type as `a` and `b` where each inner-most vector is
+    the product of the corresponding matrices in `a` and vectors in `b`, e.g. if
+    all transpose or adjoint attributes are `False`:
+
+    `output`[..., i] = sum_k (`a`[..., i, k] * `b`[..., k]), for all indices i.
+
+    Note: This is matrix-vector product, not element-wise product.
+
+
+  Raises:
+    ValueError: If transpose_a and adjoint_a are both set to True.
+  """
+  with ops.name_scope(name, "MatVec", [a, b]) as name:
+    output = matmul(
+        a,
+        array_ops.expand_dims(b, axis=-1),
+        transpose_a=transpose_a,
+        adjoint_a=adjoint_a,
+        a_is_sparse=a_is_sparse,
+        b_is_sparse=b_is_sparse)
+    return array_ops.squeeze(output, axis=-1)
+
+
 _OverrideBinaryOperatorHelper(matmul, "matmul")
 
 sparse_matmul = gen_math_ops.sparse_mat_mul
@@ -2173,7 +2271,7 @@ def add_n(inputs, name=None):
   return gen_math_ops.add_n(inputs, name=name)
 
 
-@tf_export("math.accumulate_n", "accumulate_n")
+@tf_export("math.accumulate_n", v1=["math.accumulate_n", "accumulate_n"])
 @deprecation.deprecated_endpoints("accumulate_n")
 def accumulate_n(inputs, shape=None, tensor_dtype=None, name=None):
   """Returns the element-wise sum of a list of tensors.
@@ -2283,7 +2381,7 @@ def sigmoid(x, name=None):
     return gen_math_ops.sigmoid(x, name=name)
 
 
-@tf_export("math.log_sigmoid", "log_sigmoid")
+@tf_export("math.log_sigmoid", v1=["math.log_sigmoid", "log_sigmoid"])
 @deprecation.deprecated_endpoints("log_sigmoid")
 def log_sigmoid(x, name=None):
   """Computes log sigmoid of `x` element-wise.
@@ -2324,7 +2422,7 @@ def tanh(x, name=None):
       return gen_math_ops.tanh(x, name=name)
 
 
-@tf_export("math.bincount", "bincount")
+@tf_export("math.bincount", v1=["math.bincount", "bincount"])
 @deprecation.deprecated_endpoints("bincount")
 def bincount(arr,
              weights=None,
@@ -2424,7 +2522,7 @@ def cumsum(x, axis=0, exclusive=False, reverse=False, name=None):
         x, axis, exclusive=exclusive, reverse=reverse, name=name)
 
 
-@tf_export("math.cumprod", "cumprod")
+@tf_export("math.cumprod", v1=["math.cumprod", "cumprod"])
 @deprecation.deprecated_endpoints("cumprod")
 def cumprod(x, axis=0, exclusive=False, reverse=False, name=None):
   """Compute the cumulative product of the tensor `x` along `axis`.
@@ -2477,7 +2575,7 @@ def cumprod(x, axis=0, exclusive=False, reverse=False, name=None):
         x, axis, exclusive=exclusive, reverse=reverse, name=name)
 
 
-@tf_export("math.conj", "conj")
+@tf_export("math.conj", v1=["math.conj", "conj"])
 @deprecation.deprecated_endpoints("conj")
 def conj(x, name=None):
   r"""Returns the complex conjugate of a complex number.
@@ -2578,7 +2676,9 @@ def _unsorted_segment_N(data, segment_ids, num_segments):
   return gen_math_ops.maximum(N, 1)
 
 
-@tf_export("math.unsorted_segment_mean", "unsorted_segment_mean")
+@tf_export(
+    "math.unsorted_segment_mean",
+    v1=["math.unsorted_segment_mean", "unsorted_segment_mean"])
 @deprecation.deprecated_endpoints("unsorted_segment_mean")
 def unsorted_segment_mean(data, segment_ids, num_segments, name=None):
   r"""Computes the mean along segments of a tensor.
@@ -2621,7 +2721,9 @@ def unsorted_segment_mean(data, segment_ids, num_segments, name=None):
     return summed / N
 
 
-@tf_export("math.unsorted_segment_sqrt_n", "unsorted_segment_sqrt_n")
+@tf_export(
+    "math.unsorted_segment_sqrt_n",
+    v1=["math.unsorted_segment_sqrt_n", "unsorted_segment_sqrt_n"])
 @deprecation.deprecated_endpoints("unsorted_segment_sqrt_n")
 def unsorted_segment_sqrt_n(data, segment_ids, num_segments, name=None):
   r"""Computes the sum along segments of a tensor divided by the sqrt(N).
@@ -2667,7 +2769,8 @@ def unsorted_segment_sqrt_n(data, segment_ids, num_segments, name=None):
     return summed / gen_math_ops.sqrt(N)
 
 
-@tf_export("sparse.segment_sum", "sparse_segment_sum")
+@tf_export(
+    "sparse.segment_sum", v1=["sparse.segment_sum", "sparse_segment_sum"])
 @deprecation.deprecated_endpoints("sparse_segment_sum")
 def sparse_segment_sum(data, indices, segment_ids, name=None,
                        num_segments=None):
@@ -2741,7 +2844,8 @@ def sparse_segment_sum(data, indices, segment_ids, name=None,
         data=data, indices=indices, segment_ids=segment_ids, name=name)
 
 
-@tf_export("sparse.segment_mean", "sparse_segment_mean")
+@tf_export(
+    "sparse.segment_mean", v1=["sparse.segment_mean", "sparse_segment_mean"])
 @deprecation.deprecated_endpoints("sparse_segment_mean")
 def sparse_segment_mean(data,
                         indices,
@@ -2787,7 +2891,9 @@ def sparse_segment_mean(data,
         data=data, indices=indices, segment_ids=segment_ids, name=name)
 
 
-@tf_export("sparse.segment_sqrt_n", "sparse_segment_sqrt_n")
+@tf_export(
+    "sparse.segment_sqrt_n",
+    v1=["sparse.segment_sqrt_n", "sparse_segment_sqrt_n"])
 @deprecation.deprecated_endpoints("sparse_segment_sqrt_n")
 def sparse_segment_sqrt_n(data,
                           indices,

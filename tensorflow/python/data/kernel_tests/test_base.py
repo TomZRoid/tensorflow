@@ -19,10 +19,13 @@ from __future__ import print_function
 
 import re
 
+from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.util import nest
 from tensorflow.python.eager import context
+from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.ops import array_ops
 from tensorflow.python.platform import test
 
 
@@ -59,10 +62,42 @@ class DatasetTestBase(test.TestCase):
       nxt = it.get_next()
       return lambda: nxt
 
+  def _compare_output_to_expected(self, result_values, expected_values):
+    for i in range(len(result_values)):
+      if sparse_tensor.is_sparse(result_values[i]):
+        self.assertSparseValuesEqual(result_values[i], expected_values[i])
+      else:
+        self.assertAllEqual(result_values[i], expected_values[i])
+
+  def assertDatasetProduces(self,
+                            input_dataset,
+                            expected_output=None,
+                            expected_err=None,
+                            create_iterator_twice=True):
+
+    if expected_err:
+      with self.assertRaisesWithPredicateMatch(expected_err[0],
+                                               expected_err[1]):
+        get_next = self.getNext(input_dataset)
+        self.evaluate(get_next())
+      return
+    repeated = 2 if create_iterator_twice else 1
+    for _ in range(repeated):
+      get_next = self.getNext(input_dataset)
+      result = []
+      for _ in range(len(expected_output)):
+        result.append(self.evaluate(get_next()))
+      self._compare_output_to_expected(result, expected_output)
+      with self.assertRaises(errors.OutOfRangeError):
+        self.evaluate(get_next())
+      with self.assertRaises(errors.OutOfRangeError):
+        self.evaluate(get_next())
+
   def assertDatasetsEqual(self, dataset1, dataset2):
     """Checks that datasets are equal. Supports both graph and eager mode."""
     self.assertEqual(dataset1.output_types, dataset2.output_types)
     self.assertEqual(dataset1.output_classes, dataset2.output_classes)
+    flattened_types = nest.flatten(dataset1.output_types)
 
     next1 = self.getNext(dataset1)
     next2 = self.getNext(dataset2)
@@ -79,12 +114,12 @@ class DatasetTestBase(test.TestCase):
       op2 = nest.flatten(op2)
       assert len(op1) == len(op2)
       for i in range(len(op1)):
-        if isinstance(
-            op1[i],
-            (sparse_tensor.SparseTensor, sparse_tensor.SparseTensorValue)):
+        if sparse_tensor.is_sparse(op1[i]):
           self.assertSparseValuesEqual(op1[i], op2[i])
-        else:
+        elif flattened_types[i] == dtypes.string:
           self.assertAllEqual(op1[i], op2[i])
+        else:
+          self.assertAllClose(op1[i], op2[i])
 
   def assertDatasetsRaiseSameError(self,
                                    dataset1,
@@ -107,3 +142,29 @@ class DatasetTestBase(test.TestCase):
       with self.assertRaisesRegexp(exception_class,
                                    re.escape(expected_message)):
         self.evaluate(next2())
+
+  def structuredDataset(self, structure, shape=None, dtype=dtypes.int64):
+    """Returns a singleton dataset with the given structure."""
+    if shape is None:
+      shape = []
+    if structure is None:
+      return dataset_ops.Dataset.from_tensors(
+          array_ops.zeros(shape, dtype=dtype))
+    else:
+      return dataset_ops.Dataset.zip(
+          tuple([
+              self.structuredDataset(substructure, shape, dtype)
+              for substructure in structure
+          ]))
+
+  def structuredElement(self, structure, shape=None, dtype=dtypes.int64):
+    """Returns an element with the given structure."""
+    if shape is None:
+      shape = []
+    if structure is None:
+      return array_ops.zeros(shape, dtype=dtype)
+    else:
+      return tuple([
+          self.structuredElement(substructure, shape, dtype)
+          for substructure in structure
+      ])

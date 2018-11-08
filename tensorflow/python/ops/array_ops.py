@@ -13,10 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 # Tests for this file live in python/kernel_tests/array_ops_test.py
-"""Support for manipulating tensors.
-
-See the [Array Ops](https://tensorflow.org/api_guides/python/array_ops) guide.
-"""
+"""Support for manipulating tensors."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -123,7 +120,7 @@ def expand_dims(input, axis=None, name=None, dim=None):
     axis: 0-D (scalar). Specifies the dimension index at which to
       expand the shape of `input`. Must be in the range
       `[-rank(input) - 1, rank(input)]`.
-    name: The name of the output `Tensor`.
+    name: The name of the output `Tensor` (optional).
     dim: 0-D (scalar). Equivalent to `axis`, to be deprecated.
 
   Returns:
@@ -131,9 +128,11 @@ def expand_dims(input, axis=None, name=None, dim=None):
     dimension of size 1 added.
 
   Raises:
-    ValueError: if both `dim` and `axis` are specified.
+    ValueError: if either both or neither of `dim` and `axis` are specified.
   """
   axis = deprecation.deprecated_argument_lookup("axis", axis, "dim", dim)
+  if axis is None:
+    raise ValueError("Must specify an axis argument to tf.expand_dims()")
   return gen_array_ops.expand_dims(input, axis, name)
 
 
@@ -1021,7 +1020,7 @@ def unstack(value, num=None, axis=0, name="unstack"):
       if axis < -value_shape.ndims or axis >= value_shape.ndims:
         raise ValueError("axis = %d not in [%d, %d)" %
                          (axis, -value_shape.ndims, value_shape.ndims))
-      num = value_shape[axis].value
+      num = value_shape.dims[axis].value
   if num is None:
     raise ValueError("Cannot infer num from shape %s" % value_shape)
   return gen_array_ops.unpack(value, num=num, axis=axis, name=name)
@@ -1204,7 +1203,7 @@ def boolean_mask(tensor, mask, name="boolean_mask", axis=None):
     return _apply_mask_1d(tensor, mask, axis)
 
 
-@tf_export("sparse.mask", "sparse_mask")
+@tf_export("sparse.mask", v1=["sparse.mask", "sparse_mask"])
 @deprecation.deprecated_endpoints("sparse_mask")
 def sparse_mask(a, mask_indices, name=None):
   """Masks elements of `IndexedSlices`.
@@ -1427,7 +1426,7 @@ def transpose(a, perm=None, name="transpose", conjugate=False):
 
 
 # pylint: disable=invalid-name
-@tf_export("linalg.transpose", "matrix_transpose")
+@tf_export("linalg.transpose", v1=["linalg.transpose", "matrix_transpose"])
 @deprecation.deprecated_endpoints("matrix_transpose")
 def matrix_transpose(a, name="matrix_transpose", conjugate=False):
   """Transposes last two dimensions of tensor `a`.
@@ -1763,7 +1762,8 @@ def _normalize_sparse_shape(shape, name):
   return (ops.convert_to_tensor(shape, dtype=dtypes.int64, name=name), rank)
 
 
-@tf_export("sparse.placeholder", "sparse_placeholder")
+@tf_export(
+    "sparse.placeholder", v1=["sparse.placeholder", "sparse_placeholder"])
 @deprecation.deprecated_endpoints("sparse_placeholder")
 def sparse_placeholder(dtype, shape=None, name=None):
   """Inserts a placeholder for a sparse tensor that will be always fed.
@@ -2221,7 +2221,7 @@ def required_space_to_batch_paddings(input_shape,
 
     block_shape.get_shape().assert_is_fully_defined()
     block_shape.get_shape().assert_has_rank(1)
-    num_block_dims = block_shape.get_shape()[0].value
+    num_block_dims = block_shape.get_shape().dims[0].value
     if num_block_dims == 0:
       return zeros([0, 2], dtypes.int32), zeros([0, 2], dtypes.int32)
 
@@ -2258,7 +2258,7 @@ def required_space_to_batch_paddings(input_shape,
     return result_paddings, result_crops
 
 
-@tf_export("nn.space_to_batch", "space_to_batch")
+@tf_export("nn.space_to_batch", v1=["nn.space_to_batch", "space_to_batch"])
 @deprecation.deprecated_endpoints("space_to_batch")
 def space_to_batch(input, paddings, block_size, name=None):  # pylint: disable=redefined-builtin
   result = space_to_batch_nd(
@@ -2273,7 +2273,7 @@ def space_to_batch(input, paddings, block_size, name=None):  # pylint: disable=r
 space_to_batch.__doc__ = gen_array_ops.space_to_batch.__doc__
 
 
-@tf_export("nn.space_to_depth", "space_to_depth")
+@tf_export("nn.space_to_depth", v1=["nn.space_to_depth", "space_to_depth"])
 @deprecation.deprecated_endpoints("space_to_depth")
 def space_to_depth(input, block_size, name=None, data_format="NHWC"):  # pylint: disable=redefined-builtin
   return gen_array_ops.space_to_depth(input, block_size, data_format, name=name)
@@ -2282,7 +2282,7 @@ def space_to_depth(input, block_size, name=None, data_format="NHWC"):  # pylint:
 space_to_depth.__doc__ = gen_array_ops.space_to_depth.__doc__
 
 
-@tf_export("nn.depth_to_space", "depth_to_space")
+@tf_export("nn.depth_to_space", v1=["nn.depth_to_space", "depth_to_space"])
 @deprecation.deprecated_endpoints("depth_to_space")
 def depth_to_space(input, block_size, name=None, data_format="NHWC"):  # pylint: disable=redefined-builtin
   return gen_array_ops.depth_to_space(input, block_size, data_format, name=name)
@@ -2458,7 +2458,7 @@ def _all_dimensions(x):
         np.arange(x.get_shape().ndims), dtype=dtypes.int32)
   if (isinstance(x, sparse_tensor.SparseTensor) and
       x.dense_shape.get_shape().is_fully_defined()):
-    r = x.dense_shape.get_shape()[0].value  # sparse.dense_shape is 1-D.
+    r = x.dense_shape.get_shape().dims[0].value  # sparse.dense_shape is 1-D.
     return constant_op.constant(np.arange(r), dtype=dtypes.int32)
 
   # Otherwise, we rely on `range` and `rank` to do the right thing at runtime.
@@ -2753,7 +2753,7 @@ def batch_gather(params, indices, name=None):
     result = reshape(flat_result, concat([indices_shape, outer_shape], axis=0))
     final_shape = indices.get_shape()[:ndims-1].merge_with(
         params.get_shape()[:ndims -1])
-    final_shape = final_shape.concatenate(indices.get_shape()[ndims-1])
+    final_shape = final_shape.concatenate(indices.get_shape().dims[ndims-1])
     final_shape = final_shape.concatenate(params.get_shape()[ndims:])
     result.set_shape(final_shape)
     return result
@@ -2787,7 +2787,7 @@ quantize_v2.__doc__ = """Please use `tf.quantize` instead."""
 
 # We want to expose tf.quantize instead of tf.quantize_v2; we can deprecate
 # tf.quantize_v2 in next version of TensorFlow.
-@tf_export("quantization.quantize", "quantize")
+@tf_export("quantization.quantize", v1=["quantization.quantize", "quantize"])
 @deprecation.deprecated_endpoints("quantize")
 def quantize(input,  # pylint: disable=redefined-builtin
              min_range,

@@ -195,17 +195,16 @@ StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
       }
       break;
     case HloOpcode::kSort: {
-      TF_RET_CHECK(proto.operand_ids_size() == 1 ||
-                   proto.operand_ids_size() == 2)
-          << "Sort instruction should have 1 or 2 operands but has "
+      TF_RET_CHECK(proto.operand_ids_size() >= 1)
+          << "Sort instruction should have at least 1 operand but has "
           << proto.operand_ids_size();
       TF_RET_CHECK(proto.dimensions().size() == 1)
           << "Sort instruction should have 1 dimension";
-      HloInstruction* keys = operands(0);
-      HloInstruction* values =
-          proto.operand_ids_size() == 2 ? operands(1) : nullptr;
-      instruction =
-          CreateSort(proto.shape(), proto.dimensions(0), keys, values);
+      auto sort_operands = all_operands();
+      HloInstruction* keys = sort_operands[0];
+      instruction = CreateSort(
+          proto.shape(), proto.dimensions(0), keys,
+          absl::Span<HloInstruction* const>(sort_operands).subspan(1));
       break;
     }
     case HloOpcode::kTranspose:
@@ -305,6 +304,9 @@ StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
                                           proto.tuple_index());
       break;
     case HloOpcode::kReducePrecision:
+      TF_RET_CHECK(proto.operand_ids_size() == 1)
+          << "ReducePrecision instruction should have 1 operand but sees "
+          << proto.operand_ids_size();
       instruction =
           CreateReducePrecision(proto.shape(), operands(0),
                                 proto.exponent_bits(), proto.mantissa_bits());
@@ -312,12 +314,16 @@ StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
     case HloOpcode::kInfeed: {
       const Shape& data_shape =
           ShapeUtil::GetTupleElementShape(proto.shape(), 0);
-      TF_RET_CHECK(proto.operand_ids_size() == 1);
+      TF_RET_CHECK(proto.operand_ids_size() == 1)
+          << "Infeed instruction should have 1 operand but sees "
+          << proto.operand_ids_size();
       instruction =
           CreateInfeed(data_shape, operands(0), proto.infeed_config());
     } break;
     case HloOpcode::kOutfeed:
-      TF_RET_CHECK(proto.operand_ids_size() == 2);
+      TF_RET_CHECK(proto.operand_ids_size() == 2)
+          << "Outfeed instruction should have 2 operands but sees "
+          << proto.operand_ids_size();
       TF_RETURN_IF_ERROR(
           ShapeUtil::ValidateShapeWithOptionalLayout(proto.outfeed_shape()));
       instruction = CreateOutfeed(proto.outfeed_shape(), operands(0),
@@ -349,6 +355,9 @@ StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
       break;
     }
     case HloOpcode::kCollectivePermute: {
+      TF_RET_CHECK(proto.operand_ids_size() == 1)
+          << "CollectivePermute instruction should have 1 operand but sees "
+          << proto.operand_ids_size();
       std::vector<std::pair<int64, int64>> source_target_pairs(
           proto.source_target_pairs_size());
       for (int i = 0; i < source_target_pairs.size(); i++) {
@@ -396,9 +405,22 @@ StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
           operands(1), operands(2), computations(1));
       break;
     case HloOpcode::kCustomCall:
-      instruction = CreateCustomCall(proto.shape(), all_operands(),
-                                     proto.custom_call_target(),
-                                     proto.custom_call_opaque());
+      if (proto.constrain_layout()) {
+        // A proto RepeatedPtrField cannot be converted to a Span (it is a
+        // vector of pointers essentially) so create a vector of shapes to pass
+        // in.
+        std::vector<Shape> operand_shapes;
+        for (const Shape& shape : proto.operand_shapes_with_layout()) {
+          operand_shapes.push_back(shape);
+        }
+        instruction = CreateCustomCall(
+            proto.shape(), all_operands(), proto.custom_call_target(),
+            operand_shapes, proto.custom_call_opaque());
+      } else {
+        instruction = CreateCustomCall(proto.shape(), all_operands(),
+                                       proto.custom_call_target(),
+                                       proto.custom_call_opaque());
+      }
       if (proto.has_window()) {
         static_cast<HloCustomCallInstruction*>(instruction.get())
             ->set_window(proto.window());
@@ -488,21 +510,24 @@ StatusOr<std::unique_ptr<HloInstruction>> HloInstruction::CreateFromProto(
       TF_RET_CHECK(proto.operand_ids_size() == 1)
           << "Domain instruction should have 1 operands but sees "
           << proto.operand_ids_size();
-      TF_RET_CHECK(proto.has_domain_entry_sharding())
-          << "Domain instruction must domain_entry_sharding";
-      TF_RET_CHECK(proto.has_domain_exit_sharding())
-          << "Domain instruction must domain_exit_sharding";
-      TF_ASSIGN_OR_RETURN(
-          HloSharding entry_hlo_sharding,
-          HloSharding::FromProto(proto.domain_entry_sharding()));
-      TF_ASSIGN_OR_RETURN(HloSharding exit_hlo_sharding,
-                          HloSharding::FromProto(proto.domain_exit_sharding()));
+      std::shared_ptr<const HloSharding> entry_hlo_sharding;
+      std::shared_ptr<const HloSharding> exit_hlo_sharding;
+      if (proto.has_domain_entry_sharding()) {
+        TF_ASSIGN_OR_RETURN(
+            HloSharding sharding,
+            HloSharding::FromProto(proto.domain_entry_sharding()));
+        entry_hlo_sharding = std::make_shared<const HloSharding>(sharding);
+      }
+      if (proto.has_domain_exit_sharding()) {
+        TF_ASSIGN_OR_RETURN(
+            HloSharding sharding,
+            HloSharding::FromProto(proto.domain_exit_sharding()));
+        exit_hlo_sharding = std::make_shared<const HloSharding>(sharding);
+      }
       instruction = absl::make_unique<HloDomainInstruction>(
           proto.shape(), operands(0),
-          absl::make_unique<ShardingMetadata>(
-              std::make_shared<const HloSharding>(entry_hlo_sharding)),
-          absl::make_unique<ShardingMetadata>(
-              std::make_shared<const HloSharding>(exit_hlo_sharding)));
+          absl::make_unique<ShardingMetadata>(entry_hlo_sharding),
+          absl::make_unique<ShardingMetadata>(exit_hlo_sharding));
       break;
     }
     default: {
@@ -1055,7 +1080,7 @@ HloInstruction::CreateBroadcastSequence(
 
 /* static */ std::unique_ptr<HloInstruction> HloInstruction::CreateSort(
     const Shape& shape, int64 dimension, HloInstruction* keys,
-    HloInstruction* values) {
+    absl::Span<HloInstruction* const> values) {
   return absl::make_unique<HloSortInstruction>(shape, dimension, keys, values);
 }
 
@@ -1084,7 +1109,11 @@ void HloInstruction::set_single_sharding(const HloSharding& sharding) {
 
 void HloInstruction::SetupDerivedInstruction(
     HloInstruction* derived_instruction) const {
-  if (sharding_ != nullptr) {
+  if (sharding_ != nullptr && ShapeUtil::CompatibleIgnoringElementType(
+                                  shape_, derived_instruction->shape())) {
+    // Only copy sharding if the shape of the two instruction is compatible
+    // because copying it between differently shaped instructions can produce
+    // invalid shardings.
     derived_instruction->set_sharding(*sharding_);
   } else {
     derived_instruction->clear_sharding();
@@ -1140,6 +1169,15 @@ bool HloInstruction::HasSideEffect() const {
     absl::string_view custom_call_target, absl::string_view opaque) {
   return absl::make_unique<HloCustomCallInstruction>(
       shape, operands, custom_call_target, opaque);
+}
+
+/* static */ std::unique_ptr<HloInstruction> HloInstruction::CreateCustomCall(
+    const Shape& shape, absl::Span<HloInstruction* const> operands,
+    absl::string_view custom_call_target,
+    absl::Span<const Shape> operand_shapes_with_layout,
+    absl::string_view opaque) {
+  return absl::make_unique<HloCustomCallInstruction>(
+      shape, operands, custom_call_target, opaque, operand_shapes_with_layout);
 }
 
 /* static */ std::unique_ptr<HloInstruction> HloInstruction::CreateTuple(
@@ -2605,50 +2643,7 @@ Status HloInstruction::Accept(
   return this->Accept(&visitor);
 }
 
-Status HloInstruction::AcceptOrdered(
-    DfsHloVisitor* visitor, const std::vector<const HloInstruction*>& order) {
-  VLOG(2) << "HloInstruction::AcceptOrdered(%" << name() << ")";
-  TF_RET_CHECK(OrderIsTopologicalSort(order));
-
-  // Compute the predecessors of this instruction.
-  std::unordered_set<const HloInstruction*> predecessors;
-  TF_RETURN_IF_ERROR(this->Accept([&predecessors](HloInstruction* instruction) {
-    predecessors.insert(instruction);
-    return Status::OK();
-  }));
-
-  for (auto* const_instruction : order) {
-    if (!ContainsKey(predecessors, const_instruction)) {
-      // Instruction is not a predecessors of 'this'.
-      continue;
-    }
-
-    // The visitor can mark instructions as visited to skip particular
-    // instructions.
-    if (visitor->DidVisit(*const_instruction)) {
-      VLOG(3) << "Not visiting HLO %" << const_instruction->name()
-              << " as it was already visited.";
-      continue;
-    }
-
-    // TODO(b/78350259): Eliminate const laundering.
-    HloInstruction* instruction =
-        const_cast<HloInstruction*>(const_instruction);
-
-    TF_RETURN_IF_ERROR(visitor->Preprocess(instruction));
-    VLOG(2) << "Visiting HLO %" << instruction->name();
-    TF_RETURN_IF_ERROR(instruction->Visit(visitor));
-    visitor->SetVisited(*instruction);
-    TF_RETURN_IF_ERROR(visitor->Postprocess(instruction));
-  }
-
-  return visitor->FinishVisit(this);
-}
-
-const Shape& HloInstruction::shape() const {
-  TF_DCHECK_OK(ShapeUtil::ValidateShapeWithOptionalLayout(shape_));
-  return shape_;
-}
+const Shape& HloInstruction::shape() const { return shape_; }
 
 std::vector<int64> HloInstruction::OperandIndices(
     const HloInstruction* operand) const {

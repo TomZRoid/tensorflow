@@ -65,6 +65,27 @@ class LayoutAssignmentTest : public HloVerifiedTestBase {
         FindInstruction(module, name)->shape().layout().minor_to_major();
     return std::vector<int64>(minor_to_major.begin(), minor_to_major.end());
   }
+
+  void ExpectLayoutIs(const Shape& shape,
+                      absl::Span<const int64> minor_to_major) {
+    const Layout expected = LayoutUtil::MakeLayout(minor_to_major);
+    EXPECT_TRUE(LayoutUtil::Equal(shape.layout(), expected))
+        << "Expected layout " << expected << ", actual " << shape.layout();
+  }
+
+  void ExpectTupleLayoutIs(
+      const Shape& shape,
+      std::initializer_list<absl::Span<const int64>> minor_to_majors) {
+    int i = 0;
+    for (const absl::Span<const int64> minor_to_major : minor_to_majors) {
+      const Layout expected = LayoutUtil::MakeLayout(minor_to_major);
+      const Layout& actual = ShapeUtil::GetTupleElementShape(shape, i).layout();
+      EXPECT_TRUE(LayoutUtil::Equal(actual, expected))
+          << "Expected tuple element " << i << " layout " << expected
+          << ", actual " << actual;
+      ++i;
+    }
+  }
 };
 
 TEST_F(LayoutAssignmentTest, ComputationLayout) {
@@ -876,11 +897,11 @@ TEST_F(LayoutAssignmentTest, AllReduceLayoutMissmatch) {
       param = (f32[2,2]) parameter(0)
       gte = f32[2,2] get-tuple-element(param), index=0
       ar.0 = f32[2,2] cross-replica-sum(gte),
-        all_reduce_id=0, replica_groups={{0}}, to_apply=add,
+        all_reduce_id=1, replica_groups={{0}}, to_apply=add,
         sharding={maximal device=0}
       const = f32[2,2] constant(f32[2,2]{{0,1},{2,3}})
       ROOT ar.1 = f32[2,2] cross-replica-sum(const),
-        all_reduce_id=0, replica_groups={{0}}, to_apply=add,
+        all_reduce_id=1, replica_groups={{0}}, to_apply=add,
         sharding={maximal device=1}
     })";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
@@ -1100,6 +1121,228 @@ TEST_F(LayoutAssignmentTest, TupleCopyOnLayoutMismatch) {
   // in which case the test didn't prove anything.
   EXPECT_THAT(LayoutOf(&module(), "ibuf"), ElementsAre(0, 1));
   EXPECT_THAT(LayoutOf(&module(), "next_buf"), ElementsAre(1, 0));
+}
+
+TEST_F(LayoutAssignmentTest, CustomCallNotLayoutConstrained) {
+  const char* module_str = R"(
+HloModule CustomCallNotLayoutConstrained
+
+ENTRY %CustomCallWithNotLayoutConstrained (p: f32[42,2,3]) -> f32[1,2,3,4] {
+  %p = f32[42,2,3] parameter(0)
+  ROOT %custom-call = f32[1,2,3,4] custom-call(f32[42,2,3] %p), custom_call_target="baz"
+}
+)";
+  // Try with a couple different layouts. In each case the custom calls operand
+  // and result layout should match that of the computation.
+  {
+    TF_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<VerifiedHloModule> module,
+        ParseAndReturnVerifiedModule(module_str, GetModuleConfigForTest()));
+    ComputationLayout computation_layout = module->entry_computation_layout();
+    *computation_layout.mutable_parameter_layout(0) =
+        ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {42, 2, 3}, {0, 2, 1}));
+    *computation_layout.mutable_result_layout() = ShapeLayout(
+        ShapeUtil::MakeShapeWithLayout(F32, {1, 2, 3, 4}, {3, 2, 0, 1}));
+    AssignLayouts(module.get(), &computation_layout);
+
+    HloInstruction* root = module->entry_computation()->root_instruction();
+    ASSERT_THAT(root, op::CustomCall(op::Parameter()));
+    ExpectLayoutIs(root->shape(), {3, 2, 0, 1});
+    ExpectLayoutIs(root->operand(0)->shape(), {0, 2, 1});
+  }
+  {
+    TF_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<VerifiedHloModule> module,
+        ParseAndReturnVerifiedModule(module_str, GetModuleConfigForTest()));
+    ComputationLayout computation_layout = module->entry_computation_layout();
+    *computation_layout.mutable_parameter_layout(0) =
+        ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {42, 2, 3}, {0, 1, 2}));
+    *computation_layout.mutable_result_layout() = ShapeLayout(
+        ShapeUtil::MakeShapeWithLayout(F32, {1, 2, 3, 4}, {0, 2, 3, 1}));
+    AssignLayouts(module.get(), &computation_layout);
+
+    HloInstruction* root = module->entry_computation()->root_instruction();
+    ASSERT_THAT(root, op::CustomCall(op::Parameter()));
+    ExpectLayoutIs(root->shape(), {0, 2, 3, 1});
+    ExpectLayoutIs(root->operand(0)->shape(), {0, 1, 2});
+  }
+}
+
+TEST_F(LayoutAssignmentTest, CustomCallLayoutConstrained) {
+  const char* module_str = R"(
+HloModule CustomCallLayoutConstrained
+
+ENTRY %CustomCallWithLayoutConstraints (p0: f32[4,4], p1: f32[2,3]) -> f32[1,2,3,4] {
+  %p0 = f32[4,4] parameter(0)
+  %p1 = f32[2,3] parameter(1)
+  ROOT %custom-call = f32[1,2,3,4]{3,2,0,1} custom-call(f32[4,4] %p0, f32[2,3] %p1), custom_call_target="baz", operand_layout_constraints={f32[4,4]{0,1}, f32[2,3]{1,0}}
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<VerifiedHloModule> module,
+      ParseAndReturnVerifiedModule(module_str, GetModuleConfigForTest()));
+  ComputationLayout computation_layout = module->entry_computation_layout();
+  *computation_layout.mutable_parameter_layout(0) =
+      ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {4, 4}, {1, 0}));
+  *computation_layout.mutable_parameter_layout(1) =
+      ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {2, 3}, {1, 0}));
+  *computation_layout.mutable_result_layout() = ShapeLayout(
+      ShapeUtil::MakeShapeWithLayout(F32, {1, 2, 3, 4}, {2, 1, 0, 3}));
+  AssignLayouts(module.get(), &computation_layout);
+
+  // The custom call should be partially encapsulated in kCopy instructions
+  // because of the layout mismatches.
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              op::Copy(op::CustomCall(op::Copy(), op::Parameter())));
+
+  const HloInstruction* custom_call =
+      module->entry_computation()->root_instruction()->operand(0);
+  ExpectLayoutIs(custom_call->shape(), {3, 2, 0, 1});
+  ExpectLayoutIs(custom_call->operand(0)->shape(), {0, 1});
+  ExpectLayoutIs(custom_call->operand(1)->shape(), {1, 0});
+}
+
+TEST_F(LayoutAssignmentTest, CustomCallLayoutConstrainedZeroOperands) {
+  const char* module_str = R"(
+HloModule CustomCallLayoutConstrainedZeroOperands
+
+ENTRY %CustomCallLayoutConstrainedZeroOperands () -> f32[1,2,3,4] {
+  ROOT %custom-call = f32[1,2,3,4]{3,2,0,1} custom-call(), custom_call_target="baz", operand_layout_constraints={}
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<VerifiedHloModule> module,
+      ParseAndReturnVerifiedModule(module_str, GetModuleConfigForTest()));
+  ComputationLayout computation_layout = module->entry_computation_layout();
+  *computation_layout.mutable_result_layout() = ShapeLayout(
+      ShapeUtil::MakeShapeWithLayout(F32, {1, 2, 3, 4}, {2, 1, 0, 3}));
+  AssignLayouts(module.get(), &computation_layout);
+
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              op::Copy(op::CustomCall()));
+
+  const HloInstruction* custom_call =
+      module->entry_computation()->root_instruction()->operand(0);
+  ExpectLayoutIs(custom_call->shape(), {3, 2, 0, 1});
+}
+
+TEST_F(LayoutAssignmentTest, CustomCallLayoutConstrainedTupleOperand) {
+  const char* module_str = R"(
+HloModule CustomCallLayoutConstrainedTupleOperand
+
+ENTRY %CustomCallLayoutConstrainedTupleOperand (p0: f32[4,4], p1: f32[2,3]) -> f32[1,2,3,4] {
+  %p0 = f32[4,4] parameter(0)
+  %p1 = f32[2,3] parameter(1)
+  %tuple = (f32[4,4], f32[2,3]) tuple(%p0, %p1)
+  ROOT %custom-call = f32[1,2,3,4]{3,2,0,1} custom-call(%tuple), custom_call_target="baz", operand_layout_constraints={(f32[4,4]{1,0}, f32[2,3]{0,1})}
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<VerifiedHloModule> module,
+      ParseAndReturnVerifiedModule(module_str, GetModuleConfigForTest()));
+  ComputationLayout computation_layout = module->entry_computation_layout();
+  *computation_layout.mutable_parameter_layout(0) =
+      ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {4, 4}, {1, 0}));
+  *computation_layout.mutable_parameter_layout(1) =
+      ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {2, 3}, {1, 0}));
+  *computation_layout.mutable_result_layout() = ShapeLayout(
+      ShapeUtil::MakeShapeWithLayout(F32, {1, 2, 3, 4}, {2, 1, 0, 3}));
+  AssignLayouts(module.get(), &computation_layout);
+
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  ExpectLayoutIs(root->shape(), {2, 1, 0, 3});
+
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              op::Copy(op::CustomCall(op::Tuple())));
+
+  const HloInstruction* custom_call =
+      module->entry_computation()->root_instruction()->operand(0);
+  ExpectLayoutIs(custom_call->shape(), {3, 2, 0, 1});
+  ExpectTupleLayoutIs(custom_call->operand(0)->shape(), {{1, 0}, {0, 1}});
+}
+
+TEST_F(LayoutAssignmentTest, CustomCallLayoutConstrainedTupleResult) {
+  const char* module_str = R"(
+HloModule CustomCallLayoutConstrainedTupleResult
+
+ENTRY %CustomCallLayoutConstrainedTupleResult (p0: f32[4,4]) -> (f32[4,4]{1,0}, f32[2,3]{0,1}) {
+  %p0 = f32[4,4] parameter(0)
+  ROOT %custom-call = (f32[4,4]{1,0}, f32[2,3]{0,1}) custom-call(%p0), custom_call_target="baz", operand_layout_constraints={f32[4,4]{1,0}}
+}
+)";
+  // Try with a couple different layouts. In each case the custom calls operand
+  // and result layout should match that of the computation.
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<VerifiedHloModule> module,
+      ParseAndReturnVerifiedModule(module_str, GetModuleConfigForTest()));
+  ComputationLayout computation_layout = module->entry_computation_layout();
+  *computation_layout.mutable_parameter_layout(0) =
+      ShapeLayout(ShapeUtil::MakeShapeWithLayout(F32, {4, 4}, {1, 0}));
+  *computation_layout.mutable_result_layout() =
+      ShapeLayout(ShapeUtil::MakeTupleShape(
+          {ShapeUtil::MakeShapeWithLayout(F32, {4, 4}, {1, 0}),
+           ShapeUtil::MakeShapeWithLayout(F32, {2, 3}, {1, 0})}));
+  AssignLayouts(module.get(), &computation_layout);
+
+  ExpectTupleLayoutIs(module->result_shape(), {{1, 0}, {1, 0}});
+
+  const HloInstruction* custom_call =
+      FindInstruction(module.get(), "custom-call");
+  ExpectTupleLayoutIs(custom_call->shape(), {{1, 0}, {0, 1}});
+}
+
+Status AssignLayoutsToComputation(
+    HloModule* module,
+    ChannelLayoutConstraints* channel_constraints = nullptr) {
+  if (!module->entry_computation_layout().result_layout().LayoutIsSet()) {
+    module->mutable_entry_computation_layout()
+        ->mutable_result_layout()
+        ->SetToDefaultLayout();
+  }
+  LayoutAssignment layout_assignment(
+      module->mutable_entry_computation_layout(),
+      LayoutAssignment::InstructionCanChangeLayout, channel_constraints);
+  return layout_assignment.Run(module).status();
+}
+
+TEST_F(LayoutAssignmentTest, OverwriteDiamondShapedConstraintsX) {
+  // Check that we handle a diamond-shaped graph correctly.
+  //      transpose
+  //       /    \
+  //     add    |
+  //       \    /
+  //        tuple
+
+  auto b = HloComputation::Builder(TestName());
+  Shape ashape = ShapeUtil::MakeShape(F32, {12, 8});
+  Shape bshape = ShapeUtil::MakeShape(F32, {8, 12});
+  auto param0 =
+      b.AddInstruction(HloInstruction::CreateParameter(0, bshape, "input"));
+  auto param1 =
+      b.AddInstruction(HloInstruction::CreateParameter(1, ashape, "input"));
+  auto transpose =
+      b.AddInstruction(HloInstruction::CreateTranspose(ashape, param0, {1, 0}));
+  auto add = b.AddInstruction(
+      HloInstruction::CreateBinary(ashape, HloOpcode::kAdd, transpose, param1));
+  b.AddInstruction(HloInstruction::CreateTuple({add, transpose}));
+  auto module = CreateNewVerifiedModule();
+  module->AddEntryComputation(b.Build());
+  Shape ashape_major = ShapeUtil::MakeShapeWithLayout(F32, {12, 8}, {1, 0});
+  Shape ashape_minor = ShapeUtil::MakeShapeWithLayout(F32, {12, 8}, {0, 1});
+  *module->mutable_entry_computation_layout()->mutable_result_layout() =
+      ShapeLayout(ShapeUtil::MakeTupleShape({ashape_major, ashape_minor}));
+  const Layout r2_dim0major = LayoutUtil::MakeLayout({1, 0});
+  ForceParameterLayout(module.get(), 0, r2_dim0major);
+  ForceParameterLayout(module.get(), 1, r2_dim0major);
+  TF_ASSERT_OK(AssignLayoutsToComputation(module.get()));
+
+  EXPECT_THAT(add->shape().layout().minor_to_major(), ElementsAre(1, 0));
+  EXPECT_THAT(add->operand(0)->shape().layout().minor_to_major(),
+              ElementsAre(1, 0));
+  EXPECT_THAT(add->operand(1)->shape().layout().minor_to_major(),
+              ElementsAre(1, 0));
+
+  EXPECT_THAT(transpose->shape().layout().minor_to_major(), ElementsAre(0, 1));
 }
 
 }  // namespace

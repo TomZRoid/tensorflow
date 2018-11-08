@@ -16,8 +16,10 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_LLVM_IR_SORT_UTIL_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_LLVM_IR_SORT_UTIL_H_
 
+#include <vector>
+
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
+#include "absl/types/span.h"
 #include "llvm/IR/Value.h"
 #include "tensorflow/compiler/xla/service/gpu/partition_assignment.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_array.h"
@@ -31,10 +33,11 @@ namespace llvm_ir {
 // implements the inner loop of BitonicSort. If 'launch_dimensions' is nullptr,
 // the inner compare loop will not be parallelized.
 Status EmitSortInPlace(int64 dimension_to_sort, const IrArray& keys_array,
-                       const absl::optional<IrArray>& values_array,
-                       absl::string_view name, llvm::Value* xor_mask,
-                       llvm::IRBuilder<>* b,
-                       const gpu::LaunchDimensions* launch_dimensions);
+                       const std::vector<IrArray>& values_arrays,
+                       absl::string_view name,
+                       absl::Span<const int64> xor_masks, llvm::IRBuilder<>* b,
+                       const gpu::LaunchDimensions& launch_dimensions,
+                       int64 tile_size);
 }  // namespace llvm_ir
 }  // namespace xla
 
